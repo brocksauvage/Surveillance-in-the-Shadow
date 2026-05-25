@@ -245,7 +245,7 @@ We find that camera density per square mile is highest in the historical grades 
 
 ### Crosswalking to Modern Census Tracts
 
-To bridge the 1930s HOLC geography with present-day analyses, we crosswalk HOLC grades onto modern (2020) census tracts. For each Chicago tract we compute the share of its area that falls within each HOLC grade, and assign a single **modal grade** — the grade covering the largest share of the tract. The full share vector is retained too, so tracts that straddle multiple grades aren't forced into a binary classification.
+To bridge the 1930s HOLC geography with present-day analyses, we crosswalk HOLC grades onto modern (2020) census tracts. Rather than re-deriving the overlay ourselves, we use the published **Mapping Inequality v3 → 2020 Tract crosswalk** from American Panorama [6], which provides — for every HOLC area that intersects a U.S. census tract — the share of that tract covered by the area (`pct_tract`). We aggregate those shares per (tract, grade), retain the full share vector so tracts that straddle multiple grades aren't forced into a binary classification, and assign a single **modal grade** — the grade covering the largest share of the tract.
 
 ```{r holc-tract-crosswalk, message=FALSE, warning=FALSE}
 holc_gpkg_path <- "output/chicago_holc.gpkg"
@@ -256,25 +256,25 @@ cook_tracts <- st_transform(cook_tracts, 3435)
 cook_tracts <- st_filter(cook_tracts, chicago_bounds)
 cook_tracts <- st_make_valid(cook_tracts)
 
-# Intersect tracts with HOLC polygons; record area of each piece in mi²
-tract_pieces <- st_intersection(cook_tracts, chicago_holc)
-tract_pieces$piece_area_mi2 <- as.numeric(st_area(tract_pieces)) / 2589988.11
-tract_holc <- st_drop_geometry(tract_pieces)
+# Load the pre-computed Mapping Inequality v3 crosswalk and restrict to Chicago, IL.
+# `pct_tract` is the share of each 2020 tract covered by a given HOLC area.
+mi_crosswalk <- st_read("data/MIv3Areas_2020TractCrosswalk.geojson", quiet = TRUE) |>
+  st_drop_geometry() |>
+  filter(city == "Chicago", state == "IL", !is.na(grade)) |>
+  select(GEOID, grade, pct_tract)
 
-# Total area per tract (denominator for shares)
-tract_areas <- data.frame(GEOID = cook_tracts$GEOID, total_area_mi2 = as.numeric(st_area(cook_tracts)) / 2589988.11)
-
-# Sum piece area per (tract, grade); attach total to compute share
-grade_area <- aggregate(piece_area_mi2 ~ GEOID + grade, data = tract_holc, FUN = sum)
-grade_area <- merge(grade_area, tract_areas, by = "GEOID")
-grade_area$share <- grade_area$piece_area_mi2 / grade_area$total_area_mi2
+# Sum shares per (tract, grade) — a tract may overlap multiple HOLC areas of the same grade.
+grade_area <- mi_crosswalk |>
+  group_by(GEOID, grade) |>
+  summarise(share = sum(pct_tract), .groups = "drop") |>
+  as.data.frame()
 
 # Pivot long → wide via base reshape (one column per grade share)
-grade_shares <- reshape(grade_area[, c("GEOID", "grade", "share")], idvar = "GEOID", timevar = "grade", direction = "wide")
+grade_shares <- reshape(grade_area, idvar = "GEOID", timevar = "grade", direction = "wide")
 names(grade_shares) <- sub("share\\.", "share_", names(grade_shares))
 
-# Modal (largest-area) grade per tract — sort then keep first per GEOID
-ord <- order(grade_area$GEOID, -grade_area$piece_area_mi2)
+# Modal (largest-share) grade per tract — sort then keep first per GEOID
+ord <- order(grade_area$GEOID, -grade_area$share)
 grade_area_sorted <- grade_area[ord, ]
 modal_grade <- grade_area_sorted[!duplicated(grade_area_sorted$GEOID), c("GEOID", "grade")]
 names(modal_grade)[2] <- "modal_grade"
